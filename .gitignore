@@ -1,0 +1,6 @@
+__pycache__/
+*.db
+.env
+aliases.json
+odds.csv
+.pytest_cache/
