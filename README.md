@@ -75,6 +75,33 @@ python -m larrybot live --books Bet365 --sharp Pinnacle --bankroll 1000 --watch 
   inside the free limit.
 - Add the odds feed's team spellings to `aliases.json` when `-v` shows "not enough data" for a team you know.
 
+## Run it 24/7 on GitHub (computer off)
+
+`.github/workflows/larrybot.yml` runs the bot on GitHub's servers. It scans for
+new plays every 15 minutes and posts them to Discord. Once a day it refreshes
+match history and re-tunes the ratings. Actions minutes are free on a public repo.
+
+1. Merge this code into `main`. GitHub only runs scheduled workflows from the default branch.
+2. In the repo, go to **Settings → Secrets and variables → Actions**:
+   - **Secrets:** `ODDS_API_KEY`, `PANDASCORE_TOKEN`, `DISCORD_WEBHOOK_URL`
+   - **Variables (optional):** `BOOKS` (default `Bet365`), `SHARP` (e.g. `Pinnacle`),
+     `BANKROLL` (default `1000`), `GAMES` (default `cs2 lol valorant`), `MIN_EDGE` (default `0.03`)
+3. Go to **Actions → larrybot → Run workflow** and tick "Refresh match history" for the first run.
+   After that it runs by itself.
+
+How it works:
+- Match history, tuned settings and the list of already-sent picks are saved to
+  a `bot-state` branch after every run. Don't commit to that branch; the bot overwrites it.
+- To fix team-name mismatches, commit an `aliases.json` to `main`.
+- GitHub often starts scheduled runs a few minutes late, and sometimes skips one when it's busy.
+- If a run fails, GitHub emails you. Check the Actions tab for the log.
+- In a public repo, GitHub disables scheduled workflows after 60 days with no
+  repository activity. If you get the warning email, re-enable it from the Actions tab.
+- The repo is public, so anyone can read the code and the `bot-state` branch,
+  including your picks history. Your secrets stay hidden. If you make the repo
+  private, the free tier gives you 2,000 minutes/month. That's not enough for
+  every 15 minutes, so change the first cron to `*/30 * * * *`.
+
 ## Manual odds
 
 ```bash

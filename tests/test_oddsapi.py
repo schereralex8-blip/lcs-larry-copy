@@ -101,10 +101,16 @@ def test_live_command_end_to_end(tmp_path, monkeypatch, capsys):
     assert calls[1][1]["bookmakers"] == "Bet365,Pinnacle"
     assert calls[1][1]["eventIds"] == "10,11"  # FIFA event filtered before the odds request
 
+    # --new-only (used by the scheduled job) stays quiet on a play it already reported.
+    cli.main(argv + ["--new-only"])
+    assert " 0 new" not in capsys.readouterr().out
+    cli.main(argv + ["--new-only"])
+    assert "0 new +EV plays" in capsys.readouterr().out
+
     # Watch mode only alerts on plays it hasn't sent before.
     store = Store(db)
     found, _ = picks.evaluate({"cs2": picks.build_model(store, "cs2")}, oddsapi.fetch_lines(["Bet365"], "Pinnacle")[0], market_weight=0)
     keys = [picks.pick_key(p) for p in found]
-    assert store.new_alert_keys(keys) == set(keys)
-    assert store.new_alert_keys(keys) == set()
+    assert keys and store.new_alert_keys(keys) == set()  # already recorded by the --new-only run
+    assert store.new_alert_keys(["fresh"]) == {"fresh"}
     store.close()

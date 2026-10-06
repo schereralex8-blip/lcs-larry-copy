@@ -137,7 +137,7 @@ def cmd_live(args, store: Store) -> None:
                 books, sharp=args.sharp, games=games, best_of_lookup=lookup,
                 assume_best_of=args.assume_best_of, max_events=args.max_events,
             )
-            _report(args, store, lines, skipped, only_new=bool(args.watch))
+            _report(args, store, lines, skipped, only_new=bool(args.watch or args.new_only))
         except Exception as e:
             if not args.watch:
                 raise
@@ -237,6 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--assume-best-of", type=int, choices=[1, 3, 5], help="series length when it can't be determined")
     s.add_argument("--max-events", type=int, default=100)
     s.add_argument("--watch", type=float, metavar="MINUTES", help="keep running, alerting only on new plays")
+    s.add_argument("--new-only", action="store_true", help="skip plays already alerted on an earlier run (for cron jobs)")
     _pick_options(s)
     s.set_defaults(fn=cmd_live)
 
