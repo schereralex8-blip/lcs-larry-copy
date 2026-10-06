@@ -1,0 +1,91 @@
+# Runs the bot on GitHub's servers so your computer can stay off.
+#
+# Setup (repo Settings -> Secrets and variables -> Actions):
+#   Secrets:   ODDS_API_KEY, PANDASCORE_TOKEN, DISCORD_WEBHOOK_URL
+#   Variables: BOOKS (e.g. "Bet365"), SHARP (e.g. "Pinnacle"), BANKROLL (e.g. "1000"),
+#              GAMES (e.g. "cs2 lol valorant"), MIN_EDGE (e.g. "0.03")
+#
+# Match history, tuned settings and the "already alerted" list live in the
+# bot-state branch, which this workflow overwrites on every run. Team-name
+# aliases come from aliases.json on the main branch.
+name: larrybot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # scan odds (GitHub may start these a few minutes late)
+    - cron: "23 6 * * *" # daily: refresh match history and re-tune ratings
+  workflow_dispatch:
+    inputs:
+      refresh:
+        description: "Refresh match history and re-tune before scanning"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # to save state to the bot-state branch
+
+concurrency:
+  group: larrybot # never let two runs edit the state at once
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      BOOKS: ${{ vars.BOOKS || 'Bet365' }}
+      SHARP: ${{ vars.SHARP }}
+      BANKROLL: ${{ vars.BANKROLL || '1000' }}
+      GAMES: ${{ vars.GAMES || 'cs2 lol valorant' }}
+      MIN_EDGE: ${{ vars.MIN_EDGE || '0.03' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore state
+        run: |
+          set +e
+          git ls-remote --exit-code --heads origin bot-state > /dev/null
+          status=$?
+          set -e
+          if [ "$status" = 2 ]; then
+            echo "No bot-state branch yet; starting fresh."
+          elif [ "$status" = 0 ]; then
+            git fetch --depth 1 origin bot-state
+            for f in $(git ls-tree --name-only FETCH_HEAD); do git show "FETCH_HEAD:$f" > "$f"; done
+          else
+            echo "Could not reach the repo to restore state" >&2
+            exit 1
+          fi
+
+      - name: Refresh match history and tune
+        if: github.event.schedule == '23 6 * * *' || inputs.refresh || hashFiles('larrybot.db') == ''
+        continue-on-error: true # a PandaScore hiccup shouldn't stop today's scans
+        run: |
+          python -m larrybot fetch $GAMES --pages 20
+          for g in $GAMES; do python -m larrybot backtest "$g" --tune --save > "$RUNNER_TEMP/tune-$g.txt"; head -n 1 "$RUNNER_TEMP/tune-$g.txt"; done
+
+      - name: Scan odds and alert
+        run: |
+          sharp=()
+          if [ -n "$SHARP" ]; then sharp=(--sharp "$SHARP"); fi
+          python -m larrybot live --books "$BOOKS" "${sharp[@]}" --games $GAMES \
+            --bankroll "$BANKROLL" --min-edge "$MIN_EDGE" --new-only --discord -v
+
+      - name: Save state
+        if: always() && hashFiles('larrybot.db') != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/state"
+          cp larrybot.db "$RUNNER_TEMP/state/"
+          if [ -f elo_params.json ]; then cp elo_params.json "$RUNNER_TEMP/state/"; fi
+          cd "$RUNNER_TEMP/state"
+          git init -q -b bot-state
+          git add -A
+          git -c user.name=larrybot -c user.email=larrybot@users.noreply.github.com commit -qm "bot state $(date -u +%FT%TZ)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" bot-state
