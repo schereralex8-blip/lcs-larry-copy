@@ -41,6 +41,9 @@ class Line:
     odds: float  # decimal
     opp_odds: float | None  # decimal odds of the other side, used to de-vig
     start: str = ""
+    book: str = ""
+    market_prob: float | None = None  # fair probability from a sharp book, if known
+    event_id: str = ""
 
     @property
     def event(self) -> str:
@@ -83,6 +86,7 @@ def read_lines(path: str | Path) -> list[Line]:
                 odds=oddsmath.parse_odds(row["odds"]),
                 opp_odds=oddsmath.parse_odds(row["opp_odds"]) if row.get("opp_odds") else None,
                 start=row.get("start", ""),
+                book=row.get("book", ""),
             ))
     return out
 
@@ -137,7 +141,9 @@ def evaluate(
         except ValueError as e:
             skipped.append(str(e))
             continue
-        market = oddsmath.devig_two_way(ln.odds, ln.opp_odds, devig)[0] if ln.opp_odds else None
+        market = ln.market_prob
+        if market is None and ln.opp_odds:
+            market = oddsmath.devig_two_way(ln.odds, ln.opp_odds, devig)[0]
         prob = mp if market is None else market_weight * market + (1 - market_weight) * mp
         ev = oddsmath.expected_value(prob, ln.odds)
         if ev >= min_edge:
@@ -146,10 +152,17 @@ def evaluate(
     return picks, skipped
 
 
+def pick_key(p: Pick) -> str:
+    """Identity of a play, used so watch mode alerts on each one only once."""
+    ln = p.line
+    return f"{ln.event_id or ln.event}|{ln.start}|{ln.market}|{ln.selection}|{ln.line}|{ln.book}"
+
+
 def format_pick(p: Pick, bankroll: float | None = None) -> str:
     mkt = f"mkt {p.market_prob:5.1%}" if p.market_prob is not None else "mkt   n/a"
     stake = f"{p.stake_frac:.2%} br" if bankroll is None else f"${bankroll * p.stake_frac:,.2f}"
+    book = f" [{p.line.book}]" if p.line.book else ""
     return (
         f"[{p.line.game.upper()}] {p.line.event}: {p.line.label} @ {oddsmath.decimal_to_american(p.line.odds):+d} "
-        f"({p.line.odds:.2f}) | model {p.model_prob:5.1%} {mkt} -> EV {p.ev:+.1%} | stake {stake}"
+        f"({p.line.odds:.2f}){book} | model {p.model_prob:5.1%} {mkt} -> EV {p.ev:+.1%} | stake {stake}"
     )

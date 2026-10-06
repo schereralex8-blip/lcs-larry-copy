@@ -45,7 +45,37 @@ python -m larrybot backtest cs2 --tune --save
 cp aliases.example.json aliases.json
 ```
 
-## Daily use
+## Automatic odds (no typing)
+
+Lines come from [Odds-API.io](https://odds-api.io). The free tier covers esports
+with 2 bookmakers and 100 requests/hour.
+
+```bash
+export ODDS_API_KEY=...
+# One scan: best price across the books you bet at, de-vigged against a sharp book
+python -m larrybot live --books Bet365 --sharp Pinnacle --bankroll 1000 -v
+
+# Keep running: re-check every 15 minutes, post only NEW plays to Discord, and log them
+python -m larrybot live --books Bet365 --sharp Pinnacle --bankroll 1000 --watch 15 --discord --log
+```
+
+- `--books`: the books you can actually bet at. The bot takes the best price per side across them.
+- `--sharp`: optional. Its de-vigged price becomes the market probability, which
+  works better than de-vigging your own book's line. On the free tier,
+  `--books` plus `--sharp` together can only name 2 books.
+- Bookmaker names must match Odds-API.io's spelling (for example `Bet365`, `Pinnacle`).
+- **Series length:** the odds feed doesn't say whether a match is Bo1, Bo3 or Bo5.
+  The bot reads it from PandaScore's schedule when `PANDASCORE_TOKEN` is set.
+  Otherwise it infers it from map lines (±1.5 maps or 2.5 total → Bo3; 3.5/4.5 → Bo5).
+  If neither works, it skips the match unless you pass `--assume-best-of`.
+  Guessing wrong between Bo1 and Bo3 produces fake edges, so leave that flag off when you can.
+- Only series moneylines, map handicaps and map totals are used. Round handicaps,
+  kill lines and "Map 1 winner" markets are ignored.
+- Each pass costs about 1 request plus 1 per 10 matches. `--watch 15` stays well
+  inside the free limit.
+- Add the odds feed's team spellings to `aliases.json` when `-v` shows "not enough data" for a team you know.
+
+## Manual odds
 
 ```bash
 python -m larrybot ratings cs2 --top 20
@@ -77,8 +107,7 @@ python -m larrybot settle 3 win    # win | loss | push
   not a hot week.
 
 Ideas for improving it: per-map ratings (CS2/Valorant map pools), roster-change
-resets, LAN/online adjustment, and pulling odds automatically from a feed you
-have access to.
+resets, and a LAN/online adjustment.
 
 ## Tests
 

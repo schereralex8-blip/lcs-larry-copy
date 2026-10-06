@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
+import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from larrybot import backtest, picks, series
-from larrybot.ratings import EloConfig
+from larrybot.ratings import EloConfig, normalize_team
 from larrybot.storage import Match, Store, parse_time
 
 PARAMS_FILE = "elo_params.json"
@@ -53,16 +56,12 @@ def cmd_import(args, store: Store) -> None:
 
 def cmd_ratings(args, store: Store) -> None:
     model = _model(store, args.game, args.aliases)
-    from datetime import datetime, timezone
-
     for i, (name, rating, maps) in enumerate(model.table(datetime.now(timezone.utc), args.min_maps)[: args.top], 1):
         print(f"{i:3}. {name:<28} {rating:7.1f}  ({maps} maps)")
 
 
 def cmd_predict(args, store: Store) -> None:
     model = _model(store, args.game, args.aliases)
-    from datetime import datetime, timezone
-
     p = model.map_prob(args.team_a, args.team_b, datetime.now(timezone.utc))
     print(f"{args.team_a} vs {args.team_b} (Bo{args.best_of})")
     print(f"  map win:    {p:6.1%} / {1 - p:6.1%}")
@@ -75,18 +74,24 @@ def cmd_predict(args, store: Store) -> None:
             print(f"  warning: only {s.maps_played if s else 0} maps of history for {t}")
 
 
-def cmd_scan(args, store: Store) -> None:
-    lines = picks.read_lines(args.odds)
+def _report(args, store: Store, lines: list, skipped: list[str], only_new: bool = False) -> None:
     models = {g: _model(store, g, args.aliases) for g in {ln.game for ln in lines} if store.matches(g)}
-    found, skipped = picks.evaluate(
+    found, more_skipped = picks.evaluate(
         models, lines, min_maps=args.min_maps, min_edge=args.min_edge, market_weight=args.market_weight,
         kelly=args.kelly, max_stake=args.max_stake,
     )
-    out = [picks.format_pick(p, args.bankroll) for p in found] or ["no +EV plays found"]
-    print("\n".join(out))
+    skipped = skipped + more_skipped
+    if only_new:
+        fresh = store.new_alert_keys([picks.pick_key(p) for p in found])
+        found = [p for p in found if picks.pick_key(p) in fresh]
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    out = [picks.format_pick(p, args.bankroll) for p in found]
+    print(f"{stamp}: {len(lines)} lines priced, {len(found)} {'new ' if only_new else ''}+EV plays")
+    if out:
+        print("\n".join(out))
     if skipped and args.verbose:
-        print("\nskipped:\n  " + "\n  ".join(skipped), file=sys.stderr)
-    if args.discord and found:
+        print("skipped:\n  " + "\n  ".join(skipped), file=sys.stderr)
+    if args.discord and out:
         from larrybot.alerts import send_discord
 
         send_discord(out)
@@ -96,6 +101,50 @@ def cmd_scan(args, store: Store) -> None:
             stake = p.stake_frac * (args.bankroll or 100)
             store.add_bet(p.line.game, p.line.event, p.line.market, p.line.label, p.line.odds, p.prob, stake)
         print(f"logged {len(found)} bets")
+
+
+def cmd_scan(args, store: Store) -> None:
+    _report(args, store, picks.read_lines(args.odds), [])
+
+
+def _best_of_lookup(games: set[str], aliases_path: str | None):
+    """Series lengths from PandaScore's schedule, if a token is set (the odds feed doesn't say)."""
+    if not os.environ.get("PANDASCORE_TOKEN"):
+        return None
+    from larrybot import pandascore
+
+    aliases = picks.load_aliases(aliases_path)
+    key = lambda n: aliases.get(normalize_team(n), normalize_team(n))  # noqa: E731
+    table: dict[tuple[str, frozenset], int] = {}
+    for game in games:
+        try:
+            for m in pandascore.fetch_upcoming(game):
+                table[(game, frozenset((key(m["team_a"]), key(m["team_b"]))))] = m["best_of"]
+        except Exception as e:  # schedule is a nice-to-have; fall back to inference
+            print(f"warning: PandaScore schedule for {game} unavailable: {e}", file=sys.stderr)
+    return lambda game, a, b: table.get((game, frozenset((key(a), key(b)))))
+
+
+def cmd_live(args, store: Store) -> None:
+    from larrybot import oddsapi
+
+    books = [b.strip() for b in args.books.split(",") if b.strip()]
+    games = set(args.games) if args.games else None
+    while True:
+        try:
+            lookup = _best_of_lookup(games or {g for g, _ in store.games()}, args.aliases)
+            lines, skipped = oddsapi.fetch_lines(
+                books, sharp=args.sharp, games=games, best_of_lookup=lookup,
+                assume_best_of=args.assume_best_of, max_events=args.max_events,
+            )
+            _report(args, store, lines, skipped, only_new=bool(args.watch))
+        except Exception as e:
+            if not args.watch:
+                raise
+            print(f"error: {e}", file=sys.stderr)
+        if not args.watch:
+            return
+        time.sleep(args.watch * 60)
 
 
 def cmd_backtest(args, store: Store) -> None:
@@ -136,6 +185,18 @@ def cmd_settle(args, store: Store) -> None:
     print(f"bet #{args.id}: {args.result}, profit {store.settle_bet(args.id, args.result):+.2f}")
 
 
+def _pick_options(s: argparse.ArgumentParser) -> None:
+    s.add_argument("--min-edge", type=float, default=0.03, help="minimum EV per unit, e.g. 0.03 = 3%%")
+    s.add_argument("--market-weight", type=float, default=0.5, help="how much to trust the de-vigged line (0-1)")
+    s.add_argument("--min-maps", type=int, default=20, help="skip teams with fewer maps of history")
+    s.add_argument("--kelly", type=float, default=0.25, help="Kelly multiplier")
+    s.add_argument("--max-stake", type=float, default=0.03, help="max stake as share of bankroll")
+    s.add_argument("--bankroll", type=float, help="show stakes in dollars")
+    s.add_argument("--discord", action="store_true", help="post picks to DISCORD_WEBHOOK_URL")
+    s.add_argument("--log", action="store_true", help="record picks in the bet tracker")
+    s.add_argument("-v", "--verbose", action="store_true", help="show skipped lines")
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="larrybot", description="Esports +EV betting model")
     ap.add_argument("--db", default="larrybot.db", help="SQLite database path")
@@ -166,16 +227,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("scan", help="find +EV plays in an odds CSV")
     s.add_argument("odds", help="CSV of lines (see odds_example.csv)")
-    s.add_argument("--min-edge", type=float, default=0.03, help="minimum EV per unit, e.g. 0.03 = 3%%")
-    s.add_argument("--market-weight", type=float, default=0.5, help="how much to trust the de-vigged line (0-1)")
-    s.add_argument("--min-maps", type=int, default=20, help="skip teams with fewer maps of history")
-    s.add_argument("--kelly", type=float, default=0.25, help="Kelly multiplier")
-    s.add_argument("--max-stake", type=float, default=0.03, help="max stake as share of bankroll")
-    s.add_argument("--bankroll", type=float, help="show stakes in dollars")
-    s.add_argument("--discord", action="store_true", help="post picks to DISCORD_WEBHOOK_URL")
-    s.add_argument("--log", action="store_true", help="record picks in the bet tracker")
-    s.add_argument("-v", "--verbose", action="store_true", help="show skipped lines")
+    _pick_options(s)
     s.set_defaults(fn=cmd_scan)
+
+    s = sub.add_parser("live", help="pull odds from Odds-API.io and find +EV plays")
+    s.add_argument("--books", required=True, help="comma-separated books you bet at, e.g. Bet365,DraftKings")
+    s.add_argument("--sharp", help="sharp book used as the fair-price reference, e.g. Pinnacle")
+    s.add_argument("--games", nargs="+", choices=["cs2", "lol", "valorant", "dota2", "cod", "r6"])
+    s.add_argument("--assume-best-of", type=int, choices=[1, 3, 5], help="series length when it can't be determined")
+    s.add_argument("--max-events", type=int, default=100)
+    s.add_argument("--watch", type=float, metavar="MINUTES", help="keep running, alerting only on new plays")
+    _pick_options(s)
+    s.set_defaults(fn=cmd_live)
 
     s = sub.add_parser("backtest", help="walk-forward accuracy and calibration")
     s.add_argument("game")

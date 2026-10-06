@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS bets (
     profit REAL,
     settled_at TEXT
 );
+CREATE TABLE IF NOT EXISTS alerts (
+    key TEXT PRIMARY KEY,
+    sent_at TEXT NOT NULL
+);
 """
 
 
@@ -104,6 +108,15 @@ class Store:
         with self.conn:
             self.conn.execute("UPDATE bets SET result = ?, profit = ?, settled_at = ? WHERE id = ?", (result, profit, now_iso(), bet_id))
         return profit
+
+    def new_alert_keys(self, keys: list[str]) -> set[str]:
+        """Record alert keys; return the ones not seen before."""
+        fresh = set()
+        with self.conn:
+            for k in keys:
+                if self.conn.execute("INSERT OR IGNORE INTO alerts VALUES (?, ?)", (k, now_iso())).rowcount:
+                    fresh.add(k)
+        return fresh
 
     def bets(self, open_only: bool = False) -> list[sqlite3.Row]:
         sql = "SELECT * FROM bets" + (" WHERE result IS NULL" if open_only else "") + " ORDER BY id"
